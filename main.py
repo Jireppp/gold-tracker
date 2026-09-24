@@ -6,8 +6,13 @@ One-off execution script designed for scheduled serverless CI/CD runners
 
 Orchestrates:
 1. Playwright Web Scraper (Logam Mulia, UBS Gold, Galeri 24)
-2. AI Financial News Sentiment Analyzer (feedparser + Google GenAI)
+2. AI Financial News Sentiment Analyzer (requests + feedparser + Google GenAI)
 3. Telegram Dispatcher (python-telegram-bot v20+)
+
+Resilience Guarantee:
+- If the Gemini API hits quota limits (e.g. 429) or fails for any reason,
+  a fallback notice is used and the daily Telegram message still delivers
+  the fetched gold prices.
 """
 
 import asyncio
@@ -42,6 +47,9 @@ logger = logging.getLogger("GoldTrackerBot")
 load_dotenv()
 
 JAKARTA_TZ = pytz.timezone("Asia/Jakarta")
+
+# Standard fallback summary when AI generation fails or encounters quota limits
+FALLBACK_AI_SUMMARY = "⚠️ AI Summary tidak tersedia saat ini. Mengirim data harga mentah."
 
 
 def clean_markdown_to_html(text: str) -> str:
@@ -103,27 +111,27 @@ def format_telegram_report(scraped_data: Dict[str, Any], ai_summary: str) -> str
 
     message_lines = [
         "📊 <b>UPDATE HARGA EMAS HARIAN & SENTIMEN PASAR</b>",
-        f"🗓 <i>{date_str}</i>",
+        f"🗓 Tanggal : <i>{date_str}</i>",
         "",
         "💰 <b>HARGA EMAS 1 GRAM</b>",
-        "───────────────────────────────",
-        f"🟡 <b>Logam Mulia (ANTAM)</b>",
+        "--------------------------------",
+        f"1. <b>Logam Mulia (ANTAM)</b>",
         f"  • Harga Beli : {lm_buy}{lm_tax}",
         f"  • Buyback    : {lm_sell}",
         "",
-        f"🔵 <b>UBS Gold (UBSLifestyle)</b>",
+        f"2. <b>UBS Gold (UBSLifestyle)</b>",
         f"  • Harga Beli : {ubs_buy}",
         f"  • Buyback    : {ubs_sell}",
         "",
-        f"🟢 <b>Galeri 24 (Pegadaian)</b>",
+        f"3. <b>Galeri 24 (Pegadaian)</b>",
         f"  • Harga Beli : {g24_buy}",
         f"  • Buyback    : {g24_sell}",
         "",
-        "───────────────────────────────",
-        "📰 <b>SENTIMEN PASAR & GEOPOLITIK (AI Executive Summary)</b>",
+        "--------------------------------",
+        "📰 <b>SENTIMEN PASAR & BERITA TERKINI</b>",
         f"<blockquote>{formatted_summary}</blockquote>",
         "",
-        "<i>🤖 Otomasi Harian oleh Gold Tracker Bot</i>"
+        "<i>🤖 Powered by AI & Automation</i>"
     ]
 
     return "\n".join(message_lines)
@@ -134,8 +142,9 @@ async def send_daily_update() -> None:
     Executes the daily tracking workflow:
     1. Validates environment configurations.
     2. Runs Playwright scraping and AI news sentiment analysis concurrently.
-    3. Builds the formatted Telegram HTML report.
-    4. Sends the message to the configured CHAT_ID.
+    3. Handles AI news / quota errors with fallback string, ensuring gold prices are always sent.
+    4. Builds the formatted Telegram HTML report.
+    5. Sends the message to the configured CHAT_ID.
     """
     telegram_token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("CHAT_ID")
@@ -156,20 +165,31 @@ async def send_daily_update() -> None:
 
     loop = asyncio.get_running_loop()
 
-    try:
-        # Concurrent execution of Scraper and AI News Analysis
-        async def fetch_news_and_analyze() -> str:
-            news_items = await loop.run_in_executor(None, analyzer.fetch_latest_news, 5)
-            return await loop.run_in_executor(None, analyzer.analyze_sentiments, news_items)
+    # Protected AI News task: catches any API failure, 429 quota, or network error
+    async def safe_fetch_ai_summary() -> str:
+        try:
+            summary = await loop.run_in_executor(None, analyzer.fetch_and_summarize_news, 5)
+            if not summary or not isinstance(summary, str) or not summary.strip():
+                return FALLBACK_AI_SUMMARY
+            return summary
+        except Exception as exc:
+            print(f"Error generating AI summary in send_daily_update: {exc}")
+            logger.error(f"Error generating AI summary in send_daily_update: {exc}")
+            return FALLBACK_AI_SUMMARY
 
+    try:
         logger.info("Starting concurrent tasks: Web Scraping & AI News Analysis...")
         scraper_task = scraper.scrape_all()
-        ai_task = fetch_news_and_analyze()
+        ai_task = safe_fetch_ai_summary()
 
         scraped_data, ai_summary = await asyncio.gather(scraper_task, ai_task)
-        logger.info("Successfully completed data scraping and sentiment analysis.")
+        logger.info("Completed data scraping and sentiment analysis tasks.")
 
-        # Build and send Telegram message
+        # Ensure fallback is guaranteed if summary is empty or invalid
+        if not ai_summary or not ai_summary.strip():
+            ai_summary = FALLBACK_AI_SUMMARY
+
+        # Build formatted report
         message_html = format_telegram_report(scraped_data, ai_summary)
 
         logger.info(f"Dispatching update to Telegram Chat ID: {chat_id}")
