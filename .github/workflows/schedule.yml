@@ -2,8 +2,8 @@ name: Daily Gold Tracker Bot
 
 on:
   schedule:
-    # Runs daily at 08:00 AM WIB (Asia/Jakarta, UTC+7) -> 01:00 AM UTC
-    - cron: '0 1 * * *'
+    # 02:30 UTC = 09:30 WIB
+    - cron: '30 2 * * *'
   workflow_dispatch:
 
 jobs:
