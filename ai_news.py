@@ -3,14 +3,14 @@ Daily Financial News & Sentiment Analyzer
 =========================================
 Fetches latest market headlines from stable financial RSS feeds (CNBC Indonesia,
 Antara News, Tempo Bisnis, Investing.com) and generates executive gold sentiment
-analysis using the official Google GenAI SDK.
+analysis using the official Google GenAI SDK with gemini-3.8-flash (temperature=0.1).
 
 Key Features:
 - Uses requests to fetch XML with realistic browser User-Agent headers to bypass bot protection.
 - Parses response.content via feedparser.parse().
 - Multi-source failover: loops through stable RSS alternatives with per-source try-except blocks.
 - Cleans and formats raw RSS content (strips HTML tags and excessive whitespace).
-- Invokes Gemini via the official google-genai SDK (types.GenerateContentConfig).
+- Invokes Gemini via the official google-genai SDK using gemini-3.8-flash (temperature=0.1).
 - Strict try-except error boundary around Gemini API: catches 429 quota limits, client errors,
   or network issues, prints to console, and returns a safe fallback message.
 - Ensures the Telegram bot can always deliver raw gold prices even if AI summarization is unavailable.
@@ -91,7 +91,8 @@ class FinancialNewsAnalyzer:
             else:
                 self.rss_urls = list(DEFAULT_RSS_URLS)
 
-        self.primary_model: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+        # Updated default model to gemini-3.8-flash
+        self.primary_model: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
     def fetch_latest_news(self, limit: int = 5) -> List[Dict[str, str]]:
         """
@@ -151,7 +152,7 @@ class FinancialNewsAnalyzer:
     def analyze_sentiments(self, news_items: List[Dict[str, str]]) -> str:
         """
         Sends the compiled news headlines to Gemini and generates an Indonesian
-        executive sentiment summary with temperature=0.1.
+        executive sentiment summary with gemini-3.8-flash and temperature=0.1.
 
         Strict try-except block: If the Gemini API hits a quota limit (e.g. 429),
         fails, or throws any error, it catches the exception, prints it to console,
@@ -178,20 +179,21 @@ class FinancialNewsAnalyzer:
                 f"News Headlines:\n{news_payload}"
             )
 
+            # Strict temperature=0.1 as specified
             config = types.GenerateContentConfig(
                 temperature=0.1,
             )
 
-            # Model hierarchy: primary model, then active fallbacks
+            # Model hierarchy: gemini-3.8-flash first, followed by active production fallbacks
             model_chain = [self.primary_model]
-            for fallback in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-1.5-flash", "gemini-3.8-flash"]:
+            for fallback in ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash"]:
                 if fallback not in model_chain:
                     model_chain.append(fallback)
 
             last_error = None
             for model in model_chain:
                 try:
-                    logger.info(f"Invoking Gemini model '{model}'...")
+                    logger.info(f"Invoking Gemini model '{model}' with temperature=0.1...")
                     response = self.client.models.generate_content(
                         model=model,
                         contents=prompt,
@@ -234,7 +236,7 @@ class FinancialNewsAnalyzer:
 
     def fetch_and_summarize_news(self, limit: int = 5) -> str:
         """
-        Orchestrates fetching news from stable RSS feeds and summarizing with Gemini.
+        Orchestrates fetching news from stable RSS feeds and summarizing with Gemini (gemini-3.8-flash).
         Catches any exception, prints it to the console, and returns FALLBACK_AI_SUMMARY.
         """
         try:
@@ -255,7 +257,7 @@ def fetch_and_summarize_news(
     1. Fetches XML using requests with realistic browser User-Agent headers.
     2. Parses response.content via feedparser.
     3. Handles multi-source failover across stable RSS alternatives with try-except blocks.
-    4. Analyzes sentiment using Gemini GenAI.
+    4. Analyzes sentiment using Google GenAI SDK (gemini-3.8-flash, temperature=0.1).
     5. Returns FALLBACK_AI_SUMMARY on quota limits (429) or any failure.
     """
     try:
@@ -269,7 +271,7 @@ def fetch_and_summarize_news(
 
 def main() -> None:
     print("\n" + "=" * 60)
-    print("TESTING fetch_and_summarize_news()")
+    print("TESTING fetch_and_summarize_news() with gemini-3.8-flash")
     print("=" * 60 + "\n")
 
     summary = fetch_and_summarize_news(limit=5)
