@@ -2,8 +2,8 @@
 Daily Financial News & Sentiment Analyzer
 =========================================
 Fetches latest market headlines from stable financial RSS feeds (CNBC Indonesia,
-Antara News, Tempo Bisnis, Investing.com) and generates executive gold sentiment
-analysis using the official Google GenAI SDK with gemini-3.8-flash (temperature=0.1).
+Antara News, Tempo Bisnis, Investing.com) and generates executive macroeconomic &
+gold sentiment analysis using the official Google GenAI SDK (gemini-3.8-flash, temperature=0.1).
 
 Key Features:
 - Uses requests to fetch XML with realistic browser User-Agent headers to bypass bot protection.
@@ -11,6 +11,7 @@ Key Features:
 - Multi-source failover: loops through stable RSS alternatives with per-source try-except blocks.
 - Cleans and formats raw RSS content (strips HTML tags and excessive whitespace).
 - Invokes Gemini via the official google-genai SDK using gemini-3.8-flash (temperature=0.1).
+- Integrates macroeconomic data (Global Gold XAU/USD & USD/IDR exchange rate).
 - Strict try-except error boundary around Gemini API: catches 429 quota limits, client errors,
   or network issues, prints to console, and returns a safe fallback message.
 - Ensures the Telegram bot can always deliver raw gold prices even if AI summarization is unavailable.
@@ -91,7 +92,6 @@ class FinancialNewsAnalyzer:
             else:
                 self.rss_urls = list(DEFAULT_RSS_URLS)
 
-        # Updated default model to gemini-3.8-flash
         self.primary_model: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
     def fetch_latest_news(self, limit: int = 5) -> List[Dict[str, str]]:
@@ -149,10 +149,15 @@ class FinancialNewsAnalyzer:
             f"All RSS sources failed to return valid news entries. Last error: {last_error}"
         )
 
-    def analyze_sentiments(self, news_items: List[Dict[str, str]]) -> str:
+    def analyze_sentiments(
+        self,
+        news_items: List[Dict[str, str]],
+        macro_data: Optional[Dict[str, Any]] = None,
+        local_prices: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
-        Sends the compiled news headlines to Gemini and generates an Indonesian
-        executive sentiment summary with gemini-3.8-flash and temperature=0.1.
+        Sends the compiled news headlines and macroeconomic data to Gemini
+        and generates an Indonesian macroeconomic analysis with temperature=0.1.
 
         Strict try-except block: If the Gemini API hits a quota limit (e.g. 429),
         fails, or throws any error, it catches the exception, prints it to console,
@@ -172,11 +177,41 @@ class FinancialNewsAnalyzer:
                 )
             news_payload = "\n\n".join(formatted_headlines)
 
+            # Build macroeconomic context
+            macro_info = []
+            if macro_data:
+                gold_usd = macro_data.get("global_gold_str", "Tidak tersedia")
+                usd_idr = macro_data.get("usd_idr_str", "Tidak tersedia")
+                macro_info.append(f"- Global Gold Price (XAU/USD): {gold_usd}")
+                macro_info.append(f"- Kurs Nilai Tukar USD/IDR: {usd_idr}")
+
+            if local_prices:
+                lm = local_prices.get("logam_mulia", {})
+                ubs = local_prices.get("ubs_gold", {})
+                g24 = local_prices.get("galeri24", {})
+                macro_info.append(
+                    f"- Harga Emas Lokal Indonesia (1 gram):\n"
+                    f"  * Logam Mulia (Antam): Beli {lm.get('buy_price', 'N/A')}, Buyback {lm.get('sell_price', 'N/A')}\n"
+                    f"  * UBS Gold: Beli {ubs.get('buy_price', 'N/A')}, Buyback {ubs.get('sell_price', 'N/A')}\n"
+                    f"  * Galeri 24: Beli {g24.get('buy_price', 'N/A')}, Buyback {g24.get('sell_price', 'N/A')}"
+                )
+
+            macro_payload = "\n".join(macro_info) if macro_info else "Data makroekonomi tidak tersedia."
+
+            # Exact prompt mandated for macroeconomic correlation analysis
             prompt = (
-                "Analyze these news headlines. Write a maximum 3-bullet-point executive summary in Indonesian "
-                "about gold price sentiments or geopolitical impacts. If there is no relevant news, state clearly "
-                "that there are no major sentiment drivers today.\n\n"
-                f"News Headlines:\n{news_payload}"
+                "You are a Macroeconomic Analyst. Analyze the correlation between the global gold price (XAU/USD), "
+                "the USD/IDR exchange rate, and local Indonesian gold prices. Based on the provided news and these numbers, "
+                "explicitly explain if local price movements are driven by global gold fluctuations or the weakening/strengthening "
+                "of the Indonesian Rupiah.\n\n"
+                f"Data Angka Makroekonomi & Pasar Saat Ini:\n{macro_payload}\n\n"
+                f"Daftar Berita Finansial Terkini:\n{news_payload}\n\n"
+                "Instruksi Analisis:\n"
+                "1. Tulis maksimal 3 poin ringkasan eksekutif (bullet points) dalam Bahasa Indonesia. Sintesiskan pengaruh "
+                "fluktuasi emas global dan pergerakan kurs Rupiah terhadap pergerakan harga emas lokal.\n"
+                "2. Berikan rekomendasi Buy/Hold/Wait yang tegas berdasarkan data angka dan teks berita di atas.\n"
+                "3. Jangan berasumsi di luar data yang diberikan. Jika tidak ada berita relevan, nyatakan secara eksplisit "
+                "bahwa tidak ada penggerak sentimen utama hari ini."
             )
 
             # Strict temperature=0.1 as specified
@@ -234,14 +269,24 @@ class FinancialNewsAnalyzer:
             logger.error(f"Error calling Gemini API: {exc}")
             return FALLBACK_AI_SUMMARY
 
-    def fetch_and_summarize_news(self, limit: int = 5) -> str:
+    def fetch_and_summarize_news(
+        self,
+        limit: int = 5,
+        macro_data: Optional[Dict[str, Any]] = None,
+        local_prices: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
-        Orchestrates fetching news from stable RSS feeds and summarizing with Gemini (gemini-3.8-flash).
-        Catches any exception, prints it to the console, and returns FALLBACK_AI_SUMMARY.
+        Orchestrates fetching news from stable RSS feeds and summarizing with Gemini
+        integrating macroeconomic indicators. Catches any exception, prints to console,
+        and returns FALLBACK_AI_SUMMARY.
         """
         try:
             news_items = self.fetch_latest_news(limit=limit)
-            return self.analyze_sentiments(news_items)
+            return self.analyze_sentiments(
+                news_items=news_items,
+                macro_data=macro_data,
+                local_prices=local_prices
+            )
         except Exception as exc:
             print(f"Error in fetch_and_summarize_news: {exc}")
             logger.error(f"Error in fetch_and_summarize_news: {exc}")
@@ -250,19 +295,26 @@ class FinancialNewsAnalyzer:
 
 def fetch_and_summarize_news(
     limit: int = 5,
-    rss_urls: Optional[List[str]] = None
+    rss_urls: Optional[List[str]] = None,
+    macro_data: Optional[Dict[str, Any]] = None,
+    local_prices: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Convenience function:
     1. Fetches XML using requests with realistic browser User-Agent headers.
     2. Parses response.content via feedparser.
     3. Handles multi-source failover across stable RSS alternatives with try-except blocks.
-    4. Analyzes sentiment using Google GenAI SDK (gemini-3.8-flash, temperature=0.1).
+    4. Analyzes sentiment using Google GenAI SDK (gemini-3.8-flash, temperature=0.1)
+       incorporating macroeconomic indicators (XAU/USD & USD/IDR).
     5. Returns FALLBACK_AI_SUMMARY on quota limits (429) or any failure.
     """
     try:
         analyzer = FinancialNewsAnalyzer(rss_urls=rss_urls)
-        return analyzer.fetch_and_summarize_news(limit=limit)
+        return analyzer.fetch_and_summarize_news(
+            limit=limit,
+            macro_data=macro_data,
+            local_prices=local_prices
+        )
     except Exception as exc:
         print(f"Error in fetch_and_summarize_news: {exc}")
         logger.error(f"Error in fetch_and_summarize_news: {exc}")
@@ -271,13 +323,27 @@ def fetch_and_summarize_news(
 
 def main() -> None:
     print("\n" + "=" * 60)
-    print("TESTING fetch_and_summarize_news() with gemini-3.8-flash")
+    print("TESTING fetch_and_summarize_news() with macroeconomic data")
     print("=" * 60 + "\n")
 
-    summary = fetch_and_summarize_news(limit=5)
+    sample_macro = {
+        "global_gold_str": "$4,229.50 / troy oz",
+        "usd_idr_str": "Rp 17.938",
+    }
+    sample_prices = {
+        "logam_mulia": {"buy_price": "Rp 1.488.000", "sell_price": "Rp 1.391.000"},
+        "ubs_gold": {"buy_price": "Rp 1.488.000", "sell_price": "Rp 1.391.000"},
+        "galeri24": {"buy_price": "Rp 1.492.000", "sell_price": "Rp 1.394.000"},
+    }
+
+    summary = fetch_and_summarize_news(
+        limit=5,
+        macro_data=sample_macro,
+        local_prices=sample_prices
+    )
 
     print("\n" + "=" * 60)
-    print("RESULTING SUMMARY:")
+    print("RESULTING MACROECONOMIC SUMMARY:")
     print("=" * 60)
     print(summary)
     print("=" * 60 + "\n")
