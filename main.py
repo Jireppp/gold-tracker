@@ -5,7 +5,7 @@ Stateful data pipeline & Telegram notification orchestrator:
 1. Macroeconomic Ingestion via yfinance (Global Gold XAU/USD & USD/IDR).
 2. Playwright Web Scraper (Logam Mulia, UBS Gold, Galeri 24).
 3. AI Macroeconomic & News Sentiment Analyzer (requests + feedparser + Google GenAI).
-4. Telegram Dispatcher (python-telegram-bot v20+).
+4. Telegram Dispatcher (python-telegram-bot v20+ with robust HTTPX timeouts).
 5. Stateful Storage via Google Sheets (gspread + service account info).
 """
 
@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import sys
+import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,7 @@ from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from telegram import Bot
 from telegram.constants import ParseMode
+from telegram.request import HTTPXRequest
 
 from ai_news import FinancialNewsAnalyzer
 from scraper import GoldPriceScraper
@@ -262,13 +264,24 @@ async def send_daily_update() -> None:
         raise ValueError("Missing TELEGRAM_TOKEN or CHAT_ID in environment variables.")
 
     logger.info("Initializing bot, scraper, and news analyzer components...")
-    bot = Bot(token=telegram_token)
+
+    # Configure resilient HTTP request timeouts (30 seconds) for Telegram Bot
+    request_config = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0,
+    )
+    bot = Bot(token=telegram_token, request=request_config)
     scraper = GoldPriceScraper()
     analyzer = FinancialNewsAnalyzer()
 
-    # Verify bot connectivity
-    bot_info = await bot.get_me()
-    logger.info(f"Connected to Telegram as @{bot_info.username} ({bot_info.first_name})")
+    # Verify bot connectivity gracefully
+    try:
+        bot_info = await bot.get_me()
+        logger.info(f"Connected to Telegram as @{bot_info.username} ({bot_info.first_name})")
+    except Exception as handshake_err:
+        logger.warning(f"Could not verify get_me() handshake with Telegram ({handshake_err}). Proceeding with execution...")
 
     loop = asyncio.get_running_loop()
 
@@ -297,7 +310,7 @@ async def send_daily_update() -> None:
                     return FALLBACK_AI_SUMMARY
                 return summary
             except Exception as exc:
-                logger.error(f"AI news summary failed: {exc}. Using fallback message.")
+                logger.error(f"AI news summary failed: {exc}. Using fallback message.", exc_info=True)
                 return FALLBACK_AI_SUMMARY
 
         ai_summary = await safe_fetch_ai_summary()
@@ -368,5 +381,10 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         sys.exit(0)
     except Exception as e:
-        logger.fatal(f"Fatal error during execution: {e}")
+        logger.critical(
+            f"Fatal error during execution: {e}\n"
+            f"\n{'=' * 30} FULL ERROR TRACEBACK {'=' * 30}\n"
+            f"{traceback.format_exc()}"
+            f"{'=' * 82}\n"
+        )
         sys.exit(1)
